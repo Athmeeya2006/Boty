@@ -1,0 +1,31 @@
+Code Bot evaluator verification — 30 September 2026
+
+26 evaluator tests passed, including actual Docker sandbox tests.
+53 upstream engine regression tests passed: castles, deathtouch,
+movement priority, mutual captures and the competition matchup adapter.
+A 38-game four-participant test bracket completed with one-turn practice
+games, exercising the full league, both semifinals, bronze, final and
+all four extra tiebreak pairs. This was a workflow test, not official play.
+A separate full game used official 150 ms / 1200-turn limits and reached
+the turn cap as a 0.5–0.5 draw without a bot fault.
+Actual single-forfeit and double-forfeit matches produced 0–1 and 0–0.
+
+Sandbox checks: no network, exactly one CPU in process affinity,
+non-root user, read-only submission, persistent per-game module state,
+configured 2 GiB cgroup memory and swap cap, 32-process cap,
+externally enforced timeout and bounded protocol output.
+
+Runtime tested: Docker 29.6.1, Python 3.12.14 inside the pinned image,
+JAX 0.11.2 / NumPy 2.5.3 on the organizer host (Python 3.14.4).
+Host dependency check passed. No automatic tournament resume or
+referee-override UI is implemented; see README for incident handling.
+
+Materials: 20 slides and 8 rulebook pages exported to PDF; text and
+layout bounds checked, submission/API pages visually inspected.
+
+2 October 2026: Added and visually checked an opening FYDY introduction
+with the official color logo and website-sourced company description.
+
+2 October 2026: Opening sequence verified as Code Bot, What is Fuzzy
+Dynamics (FYDY), and About FYDY. Venue H 205 and 6:00 PM IST kickoff
+added; 20-hour deadline verified as 3 October at 2:00 PM IST.
