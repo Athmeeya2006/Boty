@@ -146,7 +146,9 @@ def main():
                 score2 = evaluate(pool, [str(champ_path), path], opps, seeds2, a.workers)
                 m2, h2, n2, ff2 = paired(score2, path, str(champ_path))
                 rec["confirm"] = dict(gain=round(m2, 3), ci=round(h2, 3), n=n2, ff=ff2)
-                if m2 > 0.01 and ff2 == 0 and (m * n + m2 * n2) / (n + n2) >= a.min_gain:
+                # promote only if the confirmation on fresh seeds is clearly positive by itself
+                # and the pooled gain still clears the bar (guards against lucky batches)
+                if m2 >= 0.025 and m2 - h2 > -0.02 and ff2 == 0 and (m * n + m2 * n2) / (n + n2) >= a.min_gain:
                     shutil.copy(path, champ_path)
                     shutil.copy(path, out / f"champion_gen{gen}.py")
                     promoted = True

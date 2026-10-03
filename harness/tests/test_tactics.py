@@ -88,6 +88,8 @@ def main():
 
             def play(state, enemy_action, bot):
                 a = bot.act(e.observation(state, me))
+                if getattr(bot, "ERRORS", 0):
+                    note("no internal exception", False)
                 acts = [None, None]
                 acts[me], acts[en] = a, enemy_action
                 new, info = e.step(state, acts)

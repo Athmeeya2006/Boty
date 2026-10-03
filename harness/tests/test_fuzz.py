@@ -80,11 +80,17 @@ def main():
     for g in range(max(1, cases // 60)):
         st = e.initial(rng.randrange(1 << 31))
         live = load(bot_path)      # plays the whole game normally
+        corrupted_live = [False]
         skip = load(bot_path)      # sees only some observations
         for t in range(1200):
             obs = [e.observation(st, i) for i in (0, 1)]
+            e0 = getattr(live, "ERRORS", 0)
             a0 = live.act(obs[0])
             bad += check(a0, ("live", t))
+            if getattr(live, "ERRORS", 0) != e0 and not corrupted_live[0]:
+                bad += 1
+                if bad < 5:
+                    print("INTERNAL EXCEPTION on a normal observation at turn", t)
             n += 1
             if rng.random() < 0.3:
                 bad += check(skip.act(obs[0]), ("skip", t))
@@ -96,6 +102,7 @@ def main():
                     bad += check(fresh.act(corrupt(obs[slot], rng)), ("cold-corrupt", t, slot))
                     n += 2
                 bad += check(live.act(corrupt(obs[0], rng)), ("live-corrupt", t))
+                corrupted_live[0] = True   # state may be damaged afterwards: exceptions tolerated
                 # after a corrupted call the bot must keep working on the real stream
                 n += 1
             a1 = starter.act(obs[1]) if rng.random() < 0.9 else [1, 0, 0, 0, 0]

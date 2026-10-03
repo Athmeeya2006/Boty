@@ -13,6 +13,7 @@ AI assistance: Developed with Anthropic Claude (Claude Code), which wrote code u
                the participant's direction; strategy, testing and final review by the participant.
 Runtime: CPython 3.12, standard library only.
 """
+import random
 import time
 
 DEBUG = False
@@ -22,7 +23,7 @@ DEBUG = False
 # ---------------------------------------------------------------------------
 PARAMS = {
     "BUDGET_S": 0.075,          # soft per-turn compute budget (seconds)
-    "OPEN_STACK": 8,            # opening: general launches a run once it holds this much
+    "OPEN_STACK": 5,            # opening: general launches a run once it holds this much
     "OPEN_T": 70,               # opening ends: general then saves for castles
     "DEPLOY_WINDOW": 0,         # this close to a land bonus the general deploys what it has
     "DEPLOY_LAST_T": 160,       # ... during the first bonuses only
@@ -31,7 +32,7 @@ PARAMS = {
     "SCOUT_W": 0.6,             # claim score per step closer to the candidate region
     "REVEAL_BONUS": 4.0,        # claim score per candidate cell uncovered
     "WALK_PEN": 0.6,            # score cost per step a run stack walks through our own land
-    "RUN_STACK": 12,            # after the opening the general runs with this much (each half)
+    "RUN_STACK": 6,            # after the opening the general runs with this much (each half)
     "RUN_OPEN_MIN": 6,          # ... while at least this many open cells border our land
     "RUN_LAST_T": 600,          # no general expansion runs after this turn
     "CASTLE_HORIZON": 1000,     # castle income counted until this turn
@@ -39,6 +40,13 @@ PARAMS = {
     "CASTLE_MIN_SCORE": 150,     # minimum net value to start a castle plan
     "CASTLE_DEPTH": 9,          # search depth for castle sites from a stack
     "CASTLE_DANGER_R": 5,       # sites this close to known enemy land are penalised
+    "HOME_CASTLE_N": 0,         # castles to build on cells touching our general (defensive reserve)
+    "HOME_CASTLE_T": 150,       # ... from this turn
+    "HOME_CASTLE_MODE": 0,      # 0: gather for it actively, 1: the general saves up for it
+    "HOME_CASTLE_MAX_MOVES": 45,  # ... if the army can be gathered within this many moves
+    "CASTLE_FIRST_T": 500,      # no castles before this turn (measured: earlier ones cost strikes)
+    "CASTLE_PARITY": 1,         # ... except to match an enemy who has more castles than we do
+    "CASTLE_PARITY_SLACK": 0,   # allowed castle deficit before parity building starts
     "CASTLE_LAST_T": 700,       # no new castles after this turn
     "CASTLE_FRONTIER_MAX": 9999,  # build castles only when at most this many open cells border us (off: measured worse)
     "CASTLE_ANYWAY_T": 350,     # ... or after this turn
@@ -47,13 +55,25 @@ PARAMS = {
     "STACK_MIN": 30,            # a cell with this much army is a castle/strike source
     "GATHER_LAMBDA": 0.6,       # gather prune threshold (army per move)
     "THREAT_R": 14,             # enemy stacks within this walking distance are threats
+    "THREAT_SUM_MIN": 12,       # ... counting only visible stacks at least this big
+    "THREAT_SUM": 1,            # 1: enemy stacks that can arrive together are summed
     "KILL_R": 6,
     "INTERCEPT_R": 4,           # our stacks this close to an enemy stack may walk out to kill it
     "THREAT_MEM": 100,          # turns an enemy wave near home is remembered
-    "GARRISON_F": 0.8,          # garrison target = this x biggest remembered wave
+    "GARRISON_F": 0.3,          # garrison target = this x biggest remembered wave
+    "GARRISON_HIT_F": 1.0,      # garrison factor for a while after a stack reached our general
+    "GARRISON_HIT_MEM": 60,     # ... for this many turns
+    "GHOST": 1,                 # 1: track enemy stacks that walk into fog as still approaching
+    "GHOST_MIN": 10,            # ... stacks at least this big
+    "GHOST_TTL": 10,            # ... for this many turns
     "GARRISON_FREE_F": 0.0,     # ... or this x the enemy's free army (opp_army - opp_land)
     "GARRISON_FREE_T": 100,     # from this turn
     "KEEP_FREE_F": 0.0,         # general never spends below this x enemy free army (passive)
+    "FOUND_KEEP_F": 0.0,        # once the enemy has seen our general it keeps this x their free army
+    "HOARD_T": 50,              # hoarder detection starts
+    "HOARD_LAND_RATIO": 0.7,    # enemy land below this x ours = hoarding for a rush
+    "HOARD_MIN_FREE": 15,       # ... with at least this much free army
+    "HOARD_KEEP_F": 0.7,        # then the general keeps this x enemy free army
     "KEEP_T": 120,              # ... from this turn                # enemy stacks this close to home get attacked when beatable
     "DEF_MARGIN": 2,            # extra army wanted above a threat
     "STRIKE_MARGIN": 1.1,       # attack stack must exceed estimated need by this factor
@@ -65,12 +85,17 @@ PARAMS = {
     "RAID_MARGIN": 3,           # army to spare on arrival
     "RAID_PAD": 6,              # unknown leftover assumed on a castle never seen
     "STEALTH_COST": 1.5,        # path cost per cell the enemy can see (strike march)
+    "ECON_FIRST": 0,            # 1: castle building runs before strike gathering
+    "ECON_FIRST_T": 300,        # ... from this turn (before it, land and hunting come first)
+    "STRIKE_ABANDON": 0,        # 1: do not march on a known general with less than the need
+    "STRIKE_COOLDOWN": 40,      # turns to wait after abandoning an unaffordable strike
     "STAGE_D": 4,               # wait this far from their general until it is time to step in
     "SCOUT_T": 120,             # after this turn, actively hunt an unknown general
-    "HUNT_T": 50,              # hunt earlier once enemy land has been seen
+    "HUNT_T": 150,              # hunt earlier once enemy land has been seen
     "EG_GROWTH": 0.5,           # assumed army growth per turn of an unseen enemy general
     "HUNT_LIK": 1.0,            # weight of candidate likelihood vs travel distance when hunting
-    "HUNT_MIN": 15,             # minimum stack to send hunting
+    "HUNT_FILL": 0.0,           # a hunt gathers at least this x HUNT_MIN before marching
+    "HUNT_MIN": 40,             # minimum stack to send hunting
     "FORT_T": 740,              # fortress mode around our general starts
     "FORT_R": 3,                # enemy cells this close to our general get attacked
     "MOAT_MIN": 10,             # every neighbour of our general holds at least this late game
@@ -86,11 +111,16 @@ PASS = [1, 0, 0, 0, 0]
 # ---------------------------------------------------------------------------
 # Safety wrapper: never raise, always return five valid ints
 # ---------------------------------------------------------------------------
+ERRORS = 0   # exceptions swallowed by the safety wrapper (tests assert this stays 0)
+
+
 def act(observation):
+    global ERRORS
     try:
         action = _decide(observation)
     except Exception:
         action = None
+        ERRORS += 1
         if DEBUG:
             import traceback
             traceback.print_exc()
@@ -261,11 +291,20 @@ def _init(S, obs):
     S.prev = None            # previous totals
     S.pending_build = None   # (cell, cost) we asked to build last turn
     S.plan = None
+    S.cplan = None           # castle plan (separate track from strike plans)
+    S.strike_cooldown = 0
     S.last_action = None
     S.target_cache = None
     S.surcharge_notes = []
     S.threat_hist = []
     S.castle_born = {}
+    S.ghosts = []            # enemy stacks that walked into fog: [army, est. distance to our general, turn, cell]
+    S.prev_stacks = {}       # visible enemy stacks last turn: cell -> army
+    S.hit_t = -10 ** 6       # last turn an enemy stack stood next to our general
+    # deterministic per map (reproducible games), used only for deathtouch guessing games
+    S.rng = random.Random(hash((H, W, S.pid, tuple(typ))) & 0xFFFFFFFF)
+    S.found_me = False
+    S.found_me_t = -1
     S.sight = None
     S.lik_cache = None
     S.sight_t = -1
@@ -297,6 +336,7 @@ def _update(S, obs):
     S.mine, S.enemy = mine, enemy
     mem_own, mem_army, mem_t, seen = S.mem_own, S.mem_army, S.mem_t, S.seen_ever
     mem_own_prev = list(mem_own)
+    mem_army_prev = list(mem_army)
     for i in range(N):
         if vis[i]:
             mem_own[i] = own[i]
@@ -314,6 +354,13 @@ def _update(S, obs):
             if vis[i] and own[i] != 2:
                 del S.enemy_seen_cells[i]
 
+    # Has the enemy seen our general? (they see the 3x3 around every cell they own)
+    if not S.found_me:
+        for j in S.nb8[S.myG]:
+            if own[j] == 2:
+                S.found_me = True
+                S.found_me_t = t
+                break
     # Long memory of enemy stack sizes seen near home (rushers come in waves)
     dg = S.dist[S.myG]
     for i in enemy:
@@ -322,6 +369,48 @@ def _update(S, obs):
     if S.threat_hist and t - S.threat_hist[0][0] > PARAMS["THREAT_MEM"]:
         S.threat_hist = [x for x in S.threat_hist if t - x[0] <= PARAMS["THREAT_MEM"]]
 
+    # Ghost stacks: a big enemy stack we saw last turn that is gone now, with fog next to where
+    # it stood, has walked into the fog. Assume it keeps coming at one cell per turn.
+    gmin = PARAMS["GHOST_MIN"]
+    cur = {}
+    for i in enemy:
+        if arm[i] >= gmin and dg[i] <= PARAMS["THREAT_R"] + 6:
+            cur[i] = arm[i]
+    if PARAMS["GHOST"]:
+        adj_ = S.adj
+        for c, a in S.prev_stacks.items():
+            if own[c] == 1:
+                continue                     # we took the cell: the stack was destroyed
+            if vis[c] and own[c] == 2 and arm[c] >= 0.7 * a:
+                continue                     # still standing there
+            moved = False
+            fog = False
+            for n in adj_[c]:
+                if not vis[n]:
+                    fog = True
+                elif own[n] == 2 and arm[n] >= 0.6 * a:
+                    moved = True             # we can see where it went
+                elif own[n] == 1 and mem_own_prev[n] == 1 and arm[n] < mem_army_prev[n]:
+                    moved = True             # it attacked one of our cells and died or shrank there
+            if not vis[c]:
+                continue                     # its cell went dark: the remembered-cell rule covers it
+            if fog and not moved:
+                S.ghosts.append([a, max(1, dg[c] - 1), t, c])
+        if S.ghosts:
+            keep = []
+            for gh in S.ghosts:
+                a, d, t0g, c = gh
+                if t - t0g > PARAMS["GHOST_TTL"]:
+                    continue
+                # reappeared: a visible stack of similar size no farther than the ghost could be
+                if any(av >= 0.6 * a and dg[i] <= d + 4 for i, av in cur.items()):
+                    continue
+                keep.append(gh)
+            S.ghosts = keep
+    S.prev_stacks = cur
+    for j in S.adj[S.myG]:
+        if own[j] == 2 and arm[j] >= 5:
+            S.hit_t = t
     # Castles: every castle on the map shows as 3 (visible) or 5 (fog, non-wall)
     my_c = set()
     all_c = set()
@@ -500,7 +589,7 @@ def _eg_army_est(S):
     return min(est, max(1, S.opp_army - S.opp_land + 1))
 
 
-def _gather(S, roots, lam, max_nodes=None, exclude=None):
+def _gather(S, roots, lam, max_nodes=None, exclude=None, frozen=None):
     """Gather move toward `roots` over our own cells.
 
     Builds a BFS tree over our cells rooted at `roots`, prunes subtrees whose
@@ -529,7 +618,8 @@ def _gather(S, roots, lam, max_nodes=None, exclude=None):
         for x in reversed(q):
             if x in rootset:
                 continue
-            v = arm[x] - 1 - lmb + f.get(x, 0)
+            own_v = 0 if (frozen is not None and x in frozen) else arm[x] - 1
+            v = own_v - lmb + f.get(x, 0)
             f[x] = v
             p = parent[x]
             if p not in rootset and v > 0:
@@ -555,7 +645,8 @@ def _gather(S, roots, lam, max_nodes=None, exclude=None):
     gain = 0
     for x in sel:
         a = arm[x]
-        gain += a - 1
+        if frozen is None or x not in frozen:
+            gain += a - 1
         if a >= 2:
             k = (depth[x], a)
             if bkey is None or k > bkey:
@@ -746,26 +837,9 @@ def _static_eval(S, own0, arm0, ov_own, ov_arm, t_next):
             if unanswered or len(threats) >= 2:
                 return -800
             score -= 60
-    if t_next >= 800:
-        # one step further: an enemy stack next to a neighbour X of our general that can take X
-        # and keep >= 2 there with no counter from a third tile is a threat for the turn after
-        for x in adj[g]:
-            ox, ax = go(x), ga(x)
-            for z in adj[x]:
-                if z == g or go(z) != 2:
-                    continue
-                rest = ga(z) - 1 - (ax if ox == 1 else (0 if ox == 0 else -ax))
-                if ox == 2:
-                    continue
-                if rest >= 2:
-                    ok = False
-                    for y in adj[x]:
-                        if y != g and y != z and go(y) == 1 and ga(y) >= rest:
-                            ok = True
-                            break
-                    if not ok:
-                        score -= 250
         else:
+            # before deathtouch: an adjacent stack that beats the general plus our best
+            # single reinforcement captures it next turn
             gar = ga(g)
             best_re = 0
             for y in adj[g]:
@@ -776,6 +850,25 @@ def _static_eval(S, own0, arm0, ov_own, ov_arm, t_next):
                     return -700
                 if ga(x) - 1 > gar:
                     score -= 100
+    if t_next >= 800:
+        # one step further: an enemy stack next to a neighbour X of our general that can take X
+        # and keep >= 2 there with no counter from a third tile is a threat for the turn after
+        for x in adj[g]:
+            ox, ax = go(x), ga(x)
+            if ox == 2:
+                continue
+            for z in adj[x]:
+                if z == g or go(z) != 2:
+                    continue
+                rest = ga(z) - 1 - (ax if ox == 1 else 0)
+                if rest >= 2:
+                    ok = False
+                    for y in adj[x]:
+                        if y != g and y != z and go(y) == 1 and ga(y) >= rest:
+                            ok = True
+                            break
+                    if not ok:
+                        score -= 250
     # Our threats against their general
     e = S.eg
     if e is not None:
@@ -868,8 +961,12 @@ def _tactical(S, strategic_mv):
     best_score = None
     strat_score = None
     t_next = t + 1
+    guess = t >= 799            # deathtouch: count losing replies instead of stopping at the first
+    nlose_of = {}
+    complete = True
     for k, m in enumerate(cand):
         worst = None
+        nlose = 0
         for em in en_moves:
             res, oo, oa = _sim(S, own, arm, m, em, t)
             if res == 1:
@@ -880,10 +977,17 @@ def _tactical(S, strategic_mv):
                 sc = -300
             else:
                 sc = _static_eval(S, own, arm, oo, oa, t_next)
+            if sc <= -1000:
+                nlose += 1
             if worst is None or sc < worst:
                 worst = sc
-                if worst <= -1000 or (k > 0 and worst <= best_score):
+                if guess:
+                    if worst > -1000 and k > 0 and worst <= best_score:
+                        break
+                elif worst <= -1000 or (k > 0 and worst <= best_score):
                     break
+        if guess and worst is not None and worst <= -1000:
+            nlose_of[k] = nlose
         if k == 0:
             strat_score = worst
         if not found or worst > best_score:
@@ -891,7 +995,23 @@ def _tactical(S, strategic_mv):
             best = m
             found = True
         if _time_left(S) < 0:
+            complete = False
             break
+    if guess and found and complete and best_score <= -1000 and len(nlose_of) == len(cand):
+        # Every move of ours loses to some enemy reply. The enemy must guess too, so play the
+        # move with the fewest losing replies, breaking ties at random.
+        lo = min(nlose_of.values())
+        ks = [k for k, v in nlose_of.items() if v == lo]
+        if 0 in ks:
+            return None
+        best = cand[S.rng.choice(ks)]
+        _log(t, "tactical guess", best, "losing replies", lo)
+        if best is None:
+            return list(PASS)
+        if best[0] == 'b':
+            r, c = S.rc[best[1]]
+            return [2, r, c, 0, 0]
+        return _mv(S, best[0], best[1], best[2])
     if not found or strat_score >= best_score - 20:
         return None
     _log(t, "tactical override", best, best_score, "strategic", strat_key, strat_score)
@@ -948,13 +1068,26 @@ def _win_now(S):
     if best is None:
         return None
     if S.t >= 800 and bv is not None and bv <= 0:
-        # an interception is possible; let the tactical search decide
+        # Every attacker can be countered, but the enemy has only one move: with two or more
+        # attackers it is a guessing game, so pick one at random (a fixed choice could be
+        # blocked every turn by a defender that always counters the same cell). Only when our
+        # own general is not about to be touched; otherwise the tactical search decides.
+        atk = [x for x in S.adj[e] if own[x] == 1 and arm[x] >= 2]
+        danger = any(own[y] == 2 and arm[y] >= 2 for y in S.adj[S.myG])
+        if len(atk) >= 2 and not danger:
+            return _mv(S, S.rng.choice(atk), e)
         return None
     return _mv(S, best, e)
 
 
 def _strategic(S):
-    for f in (_defend, _fortress, _continue_plan, _raid, _strike, _castle, _expand, _idle):
+    late = S.t >= PARAMS["STRIKE_T"] and S.eg is not None
+    if late or not PARAMS["ECON_FIRST"] or S.t < PARAMS["ECON_FIRST_T"]:
+        order = (_defend, _fortress, _march_first, _home_castle, _castle_walk, _continue_plan, _raid, _strike,
+                 _economy_idle, _expand, _idle)
+    else:
+        order = (_defend, _fortress, _march_first, _economy, _continue_plan, _raid, _strike, _expand, _idle)
+    for f in order:
         a = f(S)
         if a is not None:
             if DEBUG:
@@ -984,6 +1117,10 @@ def _threats(S):
         if not vis[i] and t - ts <= 8 and S.mem_army[i] >= 5 and dg[i] <= R:
             # it may have moved one step per turn toward us since
             out.append((i, S.mem_army[i], max(1, dg[i] - (t - ts))))
+    for a, d, t0g, c in S.ghosts:
+        dd = max(1, d - (t - t0g))
+        if dd <= R:
+            out.append((g, a, dd))           # labelled with our own general: never mistaken for a visible stack
     return out
 
 
@@ -992,7 +1129,10 @@ def _garrison(S):
     could concentrate (opp_army minus one per owned cell bounds any stack they can bring)."""
     g1 = 0
     if S.threat_hist:
-        g1 = PARAMS["GARRISON_F"] * max(a for _, a in S.threat_hist)
+        f = PARAMS["GARRISON_F"]
+        if S.t - S.hit_t <= PARAMS["GARRISON_HIT_MEM"]:
+            f = max(f, PARAMS["GARRISON_HIT_F"])   # they reached our general recently: expect more
+        g1 = f * max(a for _, a in S.threat_hist)
     free = max(0, S.opp_army - S.opp_land)
     g2 = PARAMS["GARRISON_FREE_F"] * free if S.t >= PARAMS["GARRISON_FREE_T"] else 0
     return int(max(g1, g2))
@@ -1002,9 +1142,17 @@ def _keep(S):
     """Army the general will not SPEND (runs, castles, strike feeds). Costs no moves: the general
     simply accumulates. Sized against the waves seen and a share of the enemy's free army."""
     k = max(_reserve(S), _garrison(S))
+    free = max(0, S.opp_army - S.opp_land)
     if S.t >= PARAMS["KEEP_T"]:
-        free = max(0, S.opp_army - S.opp_land)
         k = max(k, int(PARAMS["KEEP_FREE_F"] * free))
+    # Opponent-adaptive: an enemy that owns much less land than we do while holding army is
+    # hoarding for a rush. Its free army (opp_army - opp_land) bounds the stack it can bring.
+    if S.found_me and PARAMS["FOUND_KEEP_F"] > 0:
+        # they know where our general is: bank its production against their strike
+        k = max(k, int(PARAMS["FOUND_KEEP_F"] * free))
+    if S.t >= PARAMS["HOARD_T"] and S.opp_land < PARAMS["HOARD_LAND_RATIO"] * S.my_land \
+            and free >= PARAMS["HOARD_MIN_FREE"]:
+        k = max(k, int(PARAMS["HOARD_KEEP_F"] * free))
     return k
 
 
@@ -1069,6 +1217,53 @@ def _defend(S):
         _, _, y, i, sp = kills[0]
         _log(S.t, "defend kill", S.rc[i], arm[i], "from", S.rc[y], arm[y])
         return _mv(S, y, i, sp)
+    # B before A2: when the general is really in danger, reinforcing beats chasing a moving stack
+    if S.t < 800:
+        # B) a stack that could beat the general by the time it arrives: pull army home fast
+        worst = None
+        # stacks can merge on the way in: judge them cumulatively by arrival time
+        cum = 0
+        for i, a, d in sorted(threats, key=lambda x: x[2]):
+            # sum only stacks we can see right now (remembered cells would double count a
+            # moving stack) and only real stacks
+            if S.vis[i] and own[i] == 2 and a >= PARAMS["THREAT_SUM_MIN"]:
+                cum += a
+            for power in ((a - 1, cum - 1) if PARAMS["THREAT_SUM"] else (a - 1,)):
+                cap = gar + d // 2
+                need = power - cap + PARAMS["DEF_MARGIN"]
+                if need > 0 and (worst is None or need / max(d, 1) > worst[0]):
+                    worst = (need / max(d, 1), i, a, d, need)
+        if worst is not None:
+            _, i, a, d, need = worst
+            if _strike_lands_first(S, d):
+                return None
+            act, gain, n = _gather_k(S, g, max(1, d))
+            if (act is None or gain < need) and S.vis[i] and own[i] == 2:
+                # cannot pull enough home in time: hit the stack with our biggest stack that can
+                # reach it first (combat destroys equal amounts, so even a smaller stack helps)
+                di = dist[i]
+                bx = None
+                dg_ = dist[g]
+                for y in S.mine:
+                    if y == g or arm[y] < 6 or dg_[y] <= 1:
+                        continue  # stacks beside the general are its reinforcement, keep them
+                    if di[y] <= d and (bx is None or arm[y] > arm[bx]):
+                        bx = y
+                if bx is not None and arm[bx] - 1 >= min(need - gain, a) * 0.5 and arm[bx] >= 0.4 * a:
+                    if di[bx] == 1:
+                        nxt = i
+                    else:
+                        nxt = _step_toward(S, bx, i)
+                    if nxt is not None:
+                        if S.plan is not None and S.plan.get("kind") == "strike":
+                            S.plan = None
+                        _log(S.t, "defend counter", S.rc[i], a, "with", S.rc[bx], arm[bx])
+                        return _mv(S, bx, nxt)
+            if act is not None and gain > 0:
+                if S.plan is not None and S.plan.get("phase") == "gather":
+                    S.plan = None
+                _log(S.t, "defend gather", gain, "need", need)
+                return act
     # A2) intercept: walk a stack that beats a nearby enemy stack toward it
     best = None
     for i, a, d in visible:
@@ -1096,45 +1291,6 @@ def _defend(S):
             return _mv(S, y, nxt, 1 if y == g else 0)
     if S.t >= 800:
         return None  # post-800 handled by tactics and fortress
-    # B) a stack that could beat the general by the time it arrives: pull army home fast
-    worst = None
-    for i, a, d in threats:
-        power = a - 1
-        cap = gar + d // 2
-        need = power - cap + PARAMS["DEF_MARGIN"]
-        if need > 0 and (worst is None or need / max(d, 1) > worst[0]):
-            worst = (need / max(d, 1), i, a, d, need)
-    if worst is not None:
-        _, i, a, d, need = worst
-        if _strike_lands_first(S, d):
-            return None
-        act, gain, n = _gather_k(S, g, max(1, d))
-        if (act is None or gain < need) and S.vis[i] and own[i] == 2:
-            # cannot pull enough home in time: hit the stack with our biggest stack that can
-            # reach it first (combat destroys equal amounts, so even a smaller stack helps)
-            di = dist[i]
-            bx = None
-            dg_ = dist[g]
-            for y in S.mine:
-                if y == g or arm[y] < 6 or dg_[y] <= 1:
-                    continue  # stacks beside the general are its reinforcement, keep them
-                if di[y] <= d and (bx is None or arm[y] > arm[bx]):
-                    bx = y
-            if bx is not None and arm[bx] - 1 >= min(need - gain, a) * 0.5 and arm[bx] >= 0.4 * a:
-                if di[bx] == 1:
-                    nxt = i
-                else:
-                    nxt = _step_toward(S, bx, i)
-                if nxt is not None:
-                    if S.plan is not None and S.plan.get("kind") == "strike":
-                        S.plan = None
-                    _log(S.t, "defend counter", S.rc[i], a, "with", S.rc[bx], arm[bx])
-                    return _mv(S, bx, nxt)
-        if act is not None and gain > 0:
-            if S.plan is not None and S.plan.get("phase") == "gather":
-                S.plan = None
-            _log(S.t, "defend gather", gain, "need", need)
-            return act
     # D) keep the long-memory garrison on (or next to) the general
     gn = _garrison(S)
     plan = S.plan
@@ -1197,12 +1353,21 @@ def _fortress(S):
     for i in S.enemy:
         if dg[i] <= PARAMS["FORT_R"]:
             for y in S.adj[i]:
-                if own[y] == 1 and arm[y] - 1 > arm[i]:
-                    k = (dg[i], -arm[i])
+                if own[y] != 1:
+                    continue
+                if y == g and t < 800:
+                    # before deathtouch the general must keep its army: only a half split
+                    if arm[y] // 2 > arm[i]:
+                        k = (dg[i], -arm[i], 1)
+                        if bk is None or k < bk:
+                            bk, best = k, (y, i, 1)
+                    continue
+                if arm[y] - 1 > arm[i]:
+                    k = (dg[i], -arm[i], 0)
                     if bk is None or k < bk:
-                        bk, best = k, (y, i)
+                        bk, best = k, (y, i, 0)
     if best is not None:
-        return _mv(S, best[0], best[1])
+        return _mv(S, best[0], best[1], best[2])
     # own every neighbour of the general
     for x in S.adj[g]:
         if own[x] == 0:
@@ -1257,49 +1422,140 @@ def _moat(S):
 
 
 # --- plans -------------------------------------------------------------------
-def _continue_plan(S):
-    p = S.plan
+def _castle_step(S):
+    """Continue the castle plan: walk the stack to the site and build."""
+    p = S.cplan
     if p is None:
         return None
     own, arm = S.own, S.arm
-    kind = p["kind"]
+    if S.t - p["start"] > p.get("ttl", 30):
+        S.cplan = None
+        return None
+    at, site = p["at"], p["site"]
+    if own[at] != 1:
+        S.cplan = None
+        return None
+    cost = _build_cost(S, site)
+    if at == site:
+        if S.typ[site] == 3:
+            S.cplan = None
+            return None
+        if arm[site] >= cost:
+            S.cplan = None
+            r, c = S.rc[site]
+            return [2, r, c, 0, 0]
+        # wait / gather in a little
+        act, gain, n = _gather(S, [site], PARAMS["GATHER_LAMBDA"], max_nodes=8)
+        if act is not None and arm[site] + gain >= cost:
+            return act
+        if S.t - p["start"] > 40 or act is None:
+            S.cplan = None
+        return None
+    if arm[at] < 2:
+        S.cplan = None
+        return None
+    nxt = _step_toward(S, at, site, avoid_enemy=True)
+    if nxt is None:
+        S.cplan = None
+        return None
+    sp = p.pop("split", 0) if at == S.myG else 0
+    p["at"] = nxt
+    return _mv(S, at, nxt, sp)
+
+
+def _continue_plan(S):
+    """Continue the strike plan."""
+    p = S.plan
+    if p is None:
+        return None
     if S.t - p["start"] > p.get("ttl", 60):
         S.plan = None
         return None
-    if kind == "castle":
-        at, site = p["at"], p["site"]
-        if own[at] != 1:
-            S.plan = None
-            return None
-        cost = _build_cost(S, site)
-        if at == site:
-            if S.typ[site] == 3:
-                S.plan = None
-                return None
-            if arm[site] >= cost:
-                S.plan = None
-                r, c = S.rc[site]
-                return [2, r, c, 0, 0]
-            # wait / gather in a little
-            act, gain, n = _gather(S, [site], PARAMS["GATHER_LAMBDA"], max_nodes=8)
-            if act is not None and arm[site] + gain >= cost:
-                return act
-            if S.t - p["start"] > 40:
-                S.plan = None
-            return None
-        if arm[at] < 2:
-            S.plan = None
-            return None
-        nxt = _step_toward(S, at, site, avoid_enemy=True)
-        if nxt is None:
-            S.plan = None
-            return None
-        sp = p.pop("split", 0) if at == S.myG else 0
-        p["at"] = nxt
-        return _mv(S, at, nxt, sp)
-    if kind == "strike":
+    if p["kind"] == "strike":
         return _strike_step(S)
+    S.plan = None
     return None
+
+
+def _home_castles(S):
+    """Castles on cells touching our general: the defensive reserve."""
+    dg = S.dist[S.myG]
+    return {c for c in S.my_castles if dg[c] == 1}
+
+
+def _home_castle(S):
+    """Build a castle next to our general early. It banks +1 per 2 turns with no moves, one
+    reinforcing move from the general, and nothing but defense is allowed to drain it."""
+    t = S.t
+    n_want = PARAMS["HOME_CASTLE_N"]
+    if n_want <= 0 or t < PARAMS["HOME_CASTLE_T"] or t >= PARAMS["CASTLE_LAST_T"]:
+        return None
+    if len(_home_castles(S)) >= n_want:
+        return None
+    g = S.myG
+    own, arm, typ = S.own, S.arm, S.typ
+    if _reserve(S) > 0:
+        return None            # not while a stack is bearing down on us
+    tgt = _target(S)
+    dtg = S.dist[tgt] if tgt is not None else None
+    site = None
+    sk = None
+    for x in S.adj[g]:
+        if own[x] != 1 or typ[x] != 1:
+            continue
+        k = (-arm[x], dtg[x] if dtg is not None else 0)
+        if sk is None or k < sk:
+            sk, site = k, x
+    if site is None:
+        return None
+    cost = _build_cost(S, site)
+    if arm[site] >= cost:
+        _log(t, "home castle built at", S.rc[site], "cost", cost)
+        r, c = S.rc[site]
+        return [2, r, c, 0, 0]
+    short = cost - arm[site]
+    if arm[g] - 1 >= short:
+        return _mv(S, g, site, 0)
+    if PARAMS["HOME_CASTLE_MODE"] == 1:
+        return None            # saving mode: the general stops its runs and simply accumulates
+    excl = set()
+    if S.plan is not None and S.plan.get("at") is not None and S.plan.get("phase") == "march":
+        excl.add(S.plan["at"])
+    act, gain, n = _gather_amount(S, site, short, exclude=excl or None, frozen=_claim_cells(S))
+    if act is not None and gain >= short and n <= PARAMS["HOME_CASTLE_MAX_MOVES"]:
+        return act
+    return None
+
+
+def _march_first(S):
+    """A strike that is already marching keeps moving (timing and stealth matter)."""
+    p = S.plan
+    if p is not None and p.get("kind") == "strike" and p.get("phase") == "march":
+        return _continue_plan(S)
+    return None
+
+
+def _economy(S):
+    """Castle track: continue the castle plan or start a new one."""
+    a = _castle_step(S)
+    if a is not None:
+        return a
+    return _castle(S)
+
+
+def _castle_walk(S):
+    """A castle stack already walking finishes its walk unless a strike plan is active."""
+    if S.cplan is not None and S.plan is None:
+        return _castle_step(S)
+    return None
+
+
+def _economy_idle(S):
+    """Castle track when it does not have priority: only while no strike plan is active
+    (the behaviour of the versions before the separate track)."""
+    if S.plan is not None:
+        return None
+    return _economy(S)
 
 
 def _step_toward(S, at, goal, avoid_enemy=False):
@@ -1468,11 +1724,11 @@ def _hunt_target(S, origin):
     return best
 
 
-def _gather_amount(S, root, want, max_nodes=None, exclude=None):
+def _gather_amount(S, root, want, max_nodes=None, exclude=None, frozen=None):
     """Gather toward root, preferring the most efficient subtree that still yields `want`."""
     last = None
     for lam in (12, 6, 3, 1.5, 0.75, 0.3):
-        act, gain, n = _gather(S, [root], lam, max_nodes=max_nodes, exclude=exclude)
+        act, gain, n = _gather(S, [root], lam, max_nodes=max_nodes, exclude=exclude, frozen=frozen)
         if act is None:
             continue
         last = (act, gain, n)
@@ -1485,6 +1741,8 @@ def _strike(S):
     t = S.t
     hunting = S.eg is None
     if hunting and not ((t >= PARAMS["HUNT_T"] and S.enemy_seen_cells) or t >= PARAMS["SCOUT_T"]):
+        return None
+    if not hunting and t < S.strike_cooldown and t < PARAMS["STRIKE_T"]:
         return None
     own, arm = S.own, S.arm
     g = S.myG
@@ -1517,9 +1775,8 @@ def _strike(S):
         # the general's army joins only through its explicit half-feed above the garrison
         if launch == g:
             return None
-        excl = {g} | _claim_cells(S)
-        excl.discard(launch)
-        _, gain, n = _gather(S, [launch], 0.3, exclude=excl)
+        excl = {g}
+        _, gain, n = _gather(S, [launch], 0.3, exclude=excl, frozen=_claim_cells(S) | _home_castles(S))
         gn = _keep(S)
         avail = arm[launch] - 1 + gain + max(0, min(arm[g] // 2, arm[g] - gn))
     go = False
@@ -1535,6 +1792,9 @@ def _strike(S):
         go = avail >= PARAMS["HUNT_MIN"]
     if not go:
         return None
+    if hunting:
+        # a hunt marches with a real stack, not just the bare path cost
+        need = max(need, min(avail, PARAMS["HUNT_MIN"] * PARAMS["HUNT_FILL"]))
     S.plan = dict(kind="strike", start=t, ttl=260, launch=launch, need=need, phase="gather",
                   target=tgt, at=launch, excl=excl)
     _log(t, "strike plan", S.rc[launch], "->", S.rc[tgt], "need", round(need), "avail", avail,
@@ -1576,6 +1836,15 @@ def _claim_cells(S):
                     out.add(i)
                     break
     return out
+
+
+def _strike_excl(S, p):
+    """Cells a strike gather must not pull from: its own exclusions plus a walking castle stack."""
+    excl = p.get("excl")
+    if S.cplan is not None:
+        excl = set(excl) if excl else set()
+        excl.add(S.cplan["at"])
+    return excl
 
 
 def _new_head(S, tgt):
@@ -1622,9 +1891,18 @@ def _strike_step(S):
                 if nxt is not None:
                     return _mv(S, g, nxt, 1)
         if remaining > 0 and not late and t - p["start"] < 90:
-            act, gain, n = _gather_amount(S, L, remaining, exclude=p.get("excl"))
+            act, gain, n = _gather_amount(S, L, remaining, exclude=_strike_excl(S, p),
+                                          frozen=(_claim_cells(S) if p.get("excl") else set()) | _home_castles(S))
             if act is not None and gain >= 3:
                 return act
+        if PARAMS["STRIKE_ABANDON"] and remaining > 0 and S.eg is not None \
+                and t < PARAMS["STRIKE_T"] and not late:
+            # could not reach the army needed to take a known general: do not throw the stack
+            # away. Back to economy; try again later.
+            S.plan = None
+            S.strike_cooldown = t + PARAMS["STRIKE_COOLDOWN"]
+            _log(t, "strike abandoned: short by", remaining)
+            return None
         p["phase"] = "march"
         p["at"] = L
         _log(t, "strike march from", S.rc[L], "army", arm[L])
@@ -1658,6 +1936,10 @@ def _strike_step(S):
             act, gain, n = _gather_amount(S, at, est + 50, max_nodes=12)
             if act is not None and gain > 0:
                 return act
+            if t < PARAMS["STRIKE_T"]:
+                # nothing left to pull in and deathtouch is far away: drop the plan so the
+                # economy keeps running; a new strike is planned when it is affordable
+                S.plan = None
             return None
     if own[nxt] == 2 and arm[at] - 1 <= arm[nxt]:
         act, gain, n = _gather_amount(S, at, arm[nxt] + 2 - arm[at], max_nodes=12)
@@ -1688,7 +1970,8 @@ def _raid(S):
     own, arm, dist = S.own, S.arm, S.dist
     g = S.myG
     held = S.plan["at"] if S.plan is not None and S.plan.get("kind") == "strike" else None
-    srcs = [i for i in S.mine if arm[i] >= PARAMS["RAID_MIN"] and i != g and i != held]
+    home = _home_castles(S)
+    srcs = [i for i in S.mine if arm[i] >= PARAMS["RAID_MIN"] and i != g and i != held and i not in home]
     if not srcs:
         return None
     R = PARAMS["RAID_R"]
@@ -1724,8 +2007,13 @@ def _castle(S):
     t = S.t
     if t >= PARAMS["CASTLE_LAST_T"]:
         return None
-    if S.plan is not None:
-        return None  # a staged strike is waiting: do not take its stack or replace the plan
+    if t < PARAMS["CASTLE_FIRST_T"]:
+        # Mid-game moves are worth more as strike gathering than as castles (measured), unless
+        # the enemy is out-building us: their castles are visible through fog, so keep parity.
+        if not PARAMS["CASTLE_PARITY"] or len(S.my_castles) + PARAMS["CASTLE_PARITY_SLACK"] >= len(S.en_castles):
+            return None
+    if S.cplan is not None:
+        return None
     own, arm, typ = S.own, S.arm, S.typ
     g = S.myG
     # sources: cells holding a big stack
@@ -1741,7 +2029,14 @@ def _castle(S):
     reserve = _reserve(S)
     avail = {i: arm[i] for i in S.mine}
     gar_need = _keep(S)
-    sources = [i for i in S.mine if avail[i] >= PARAMS["STACK_MIN"]]
+    busy = set()
+    if S.plan is not None:
+        # never take a strike's stack or its launch cell
+        for key in ("at", "launch"):
+            if S.plan.get(key) is not None:
+                busy.add(S.plan[key])
+    busy |= _home_castles(S)
+    sources = [i for i in S.mine if avail[i] >= PARAMS["STACK_MIN"] and i not in busy]
     if not sources:
         return None
     if g in sources and t < PARAMS["OPEN_T"] and arm[g] < 45:
@@ -1812,9 +2107,9 @@ def _castle(S):
     if s == p:
         r, c = S.rc[p]
         return [2, r, c, 0, 0]
-    S.plan = dict(kind="castle", start=t, ttl=30, at=s, site=p, split=split_src.get(s, 0))
+    S.cplan = dict(start=t, ttl=30, at=s, site=p, split=split_src.get(s, 0))
     _log(t, "castle plan from", S.rc[s], "to", S.rc[p], "score", round(bscore))
-    return _continue_plan(S)
+    return _castle_step(S)
 
 
 def _expand(S):
@@ -1853,6 +2148,9 @@ def _expand(S):
         else:
             g_run = ag // 2 >= PARAMS["RUN_STACK"] and ag - ag // 2 >= gn
             g_split = 1
+    if (PARAMS["HOME_CASTLE_MODE"] == 1 and PARAMS["HOME_CASTLE_N"] > 0 and PARAMS["HOME_CASTLE_T"] <= t
+            < PARAMS["CASTLE_LAST_T"] and len(_home_castles(S)) < PARAMS["HOME_CASTLE_N"]):
+        g_run = False          # the general is saving for its home castle
     held = S.plan["at"] if S.plan is not None and S.plan.get("kind") == "strike" else None
     # While their general is unknown, expansion doubles as scouting: claims nearer the candidate
     # region and claims that uncover candidate cells score higher.
@@ -1995,7 +2293,7 @@ def _idle(S):
     excl = None
     if S.plan is not None and S.plan.get("kind") == "strike" and S.plan.get("at") is not None:
         excl = {S.plan["at"]}
-    act, gain, n = _gather(S, roots, PARAMS["GATHER_LAMBDA"], exclude=excl)
+    act, gain, n = _gather(S, roots, PARAMS["GATHER_LAMBDA"], exclude=excl, frozen=_home_castles(S))
     if act is not None and gain >= 2:
         return act
     return None

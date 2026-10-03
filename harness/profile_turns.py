@@ -5,6 +5,7 @@ Usage: .venv/bin/python harness/profile_turns.py OPP N_SEEDS
 import importlib.util
 import random
 import sys
+import os
 import time
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def main():
     for k in range(n):
         seed = random.randrange(1 << 31)
         for slot in (0, 1):
-            me = load(ROOT / "bots" / "current.py", f"me{k}{slot}")
+            me = load(os.environ.get("PROFILE_BOT", str(ROOT / "bots" / "current.py")), f"me{k}{slot}")
             op = load(opp_path, f"op{k}{slot}")
             bots = [me, op] if slot == 0 else [op, me]
             st = e.initial(seed)

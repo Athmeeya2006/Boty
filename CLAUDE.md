@@ -196,3 +196,22 @@ Runtime: CPython 3.12, standard library only.
 ## 11. Environment (verified 2 Oct)
 * Linux, 16 cores, Python 3.12.3 at /usr/bin/python3.12, local Docker daemon available.
 * Engine venv: `.venv/` (jax 0.11.2, numpy 2.5.3). Engine step plus observations about 3 ms per turn; first compile per board shape 4 to 7 s (cached in `.jax_cache/`).
+
+## 12. Project status and hard-won rules (updated 3 Oct 04:30 IST)
+* Submission: `submission/Athmeeya_M_Kashyap_9353211491.py` = `bots/archive/v14.py` (KashyapBot).
+  Version history and every measured result: `NOTES.md`.
+* Machine limits: the laptop crashed twice from global OOM. Each game worker uses 0.5 to 0.9 GB.
+  Never run more than 9 game workers in total; run heavy jobs through `harness/safe.sh`
+  (systemd memory cap). Kill helpers with `pgrep -f "[h]arness/tune.py"` patterns, never a plain
+  `pkill -f harness/...` (it matches and kills the calling shell).
+* Evaluation discipline: bots are deterministic, so paired batches on the same seeds cancel identical
+  games exactly. Single batches of 100 to 200 pairs still produce +0.1 swings that vanish on fresh
+  seeds: promote only on a repeat win on fresh seeds (or the held-out file `harness/heldout_seeds.json`).
+* Safety suite before any submission update: `harness/tests/test_params.py`, `test_tactics.py`,
+  `test_fuzz.py` (fails on swallowed exceptions via the bot's ERRORS counter), `test_inference.py`,
+  `test_sim.py`, `evaluator/evaluate.py validate`, isolated import, one official Docker match.
+* Local runner reproduces official Docker games turn for turn (verified on 8 games).
+* Strategic findings (all measured): initiative wins. Every attempt to hold army at home, build
+  castles before about turn 500, prioritise castles over strike gathering, or restrict strike gathers
+  lost 0.05 to 0.27 points per game. Gains came from fixing concrete mistakes found by reading losses
+  (ghost stacks, walk-home, post-800 strike size, threat summing) and from better inference.

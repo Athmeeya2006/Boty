@@ -30,6 +30,7 @@ def job(args):
     st = e.initial(seed)
     feat = [dict(found=None, plans=0), dict(found=None, plans=0)]
     last_plan = [None, None]
+    prev_phase = [None, None]
     winner = -1
     turns = 1200
     for t in range(1200):
@@ -47,6 +48,10 @@ def job(args):
                 feat[i]["plan_t"] = t
                 feat[i]["plan_need"] = p.get("need")
                 feat[i]["plan_total"] = obs[i]["my_army"]
+            ph = p.get("phase") if p is not None else None
+            if ph == "march" and S.eg is not None and prev_phase[i] != "march":
+                feat[i].setdefault("marches", []).append(t)
+            prev_phase[i] = ph
             if p is not None and p.get("phase") == "march" and S.eg is not None and "march_t" not in feat[i]:
                 at = p.get("at")
                 feat[i]["march_t"] = t
@@ -127,6 +132,21 @@ def main():
           round(med(ws) or 0, 2), "loser", round(med(ls) or 0, 2))
     print("winner never marched:", sum("march_t" not in r["feat"][r["winner"]] for r in dec),
           "loser never marched:", sum("march_t" not in r["feat"][1 - r["winner"]] for r in dec), "of", len(dec))
+    # first-strike success: the side's first real march ends the game in its favour within 45 turns
+    tot = ok = 0
+    nm = []
+    for r in dec:
+        for i in (0, 1):
+            ms = r["feat"][i].get("marches") or []
+            if not ms:
+                continue
+            tot += 1
+            if r["winner"] == i and r["turns"] - ms[0] <= 45:
+                ok += 1
+            if r["winner"] == i:
+                nm.append(len(ms))
+    print(f"first real march wins the game within 45 turns: {ok}/{tot}; winner's number of marches: "
+          f"{sorted(nm)[len(nm) // 2] if nm else None} median, max {max(nm) if nm else None}")
     rows = []
     for r in dec:
         f = r["feat"][r["winner"]]
